@@ -1,0 +1,116 @@
+from flask import Flask, render_template, request, send_file, jsonify
+import qrcode
+import io
+import base64
+
+app = Flask(__name__)
+
+QRIS_TEMPLATE = (
+    "00020101021226570011ID.DANA.WWW011893600915050582508202095058250820303UMI"
+    "51440014ID.CO.QRIS.WWW0215ID10232899830180303UMI520456115303360"
+    "54041000"
+    "5802ID5916Kosupure.rentcos6013Kota Semarang610550276621960150011ID.DANA.WWW"
+    "630497B4"
+)
+
+
+def crc16_ccitt(data: str):
+    crc = 0xFFFF
+    polynomial = 0x1021
+    for c in data:
+        crc ^= ord(c) << 8
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = (crc << 1) ^ polynomial
+            else:
+                crc <<= 1
+            crc &= 0xFFFF
+    return format(crc, '04X')
+
+
+def generate_qris(amount):
+    qris = QRIS_TEMPLATE
+    start = qris.find("54")
+    length = int(qris[start + 2:start + 4])
+    nominal_awal = qris[start + 4:start + 4 + length]
+    nominal_baru = str(amount)
+    panjang = f"{len(nominal_baru):02d}"
+    replace_string = f"54{panjang}{nominal_baru}"
+    original_string = f"54{length:02d}{nominal_awal}"
+    qris = qris.replace(original_string, replace_string)
+    qris = qris[:-4]
+    crc = crc16_ccitt(qris)
+    return qris + crc
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/generate", methods=["POST"])
+def generate():
+    data = request.get_json()
+    nominal = data.get("nominal", "").strip()
+
+    if not nominal:
+        return jsonify({"error": "Masukkan nominal terlebih dahulu"}), 400
+
+    try:
+        nominal_int = int(nominal)
+        if nominal_int <= 0:
+            return jsonify({"error": "Nominal harus lebih dari 0"}), 400
+    except ValueError:
+        return jsonify({"error": "Nominal harus berupa angka"}), 400
+
+    qris_string = generate_qris(nominal_int)
+
+    qr = qrcode.QRCode(version=5, box_size=10, border=4)
+    qr.add_data(qris_string)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    img_b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+    return jsonify({
+        "image": img_b64,
+        "filename": f"QRIS_{nominal}.png",
+        "qris_string": qris_string
+    })
+
+
+@app.route("/download", methods=["POST"])
+def download():
+    data = request.get_json()
+    nominal = data.get("nominal", "").strip()
+
+    try:
+        nominal_int = int(nominal)
+    except ValueError:
+        return jsonify({"error": "Nominal tidak valid"}), 400
+
+    qris_string = generate_qris(nominal_int)
+
+    qr = qrcode.QRCode(version=5, box_size=10, border=4)
+    qr.add_data(qris_string)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+
+    return send_file(
+        buffer,
+        mimetype="image/png",
+        as_attachment=True,
+        download_name=f"QRIS_{nominal}.png"
+    )
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
+  
